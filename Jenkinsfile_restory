@@ -1,0 +1,107 @@
+
+properties([
+  parameters([
+    [$class: 'ChoiceParameter', 
+      choiceType: 'PT_SINGLE_SELECT', 
+      description: 'restore',
+      filterLength: 1,
+      filterable: false,
+      name: 'backuptime', 
+      script: [
+        $class: 'GroovyScript', 
+        script: [
+          classpath: [], 
+          sandbox: false, 
+          script: '''
+            import jenkins.model.* 
+
+            def AWS_ACCESS_KEY_ID = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(com.cloudbees.plugins.credentials.common.StandardCredentials.class, Jenkins.instance, null, null).find{it.id == "AWS_ACCESS_KEY_ID"}.getSecret()
+            def AWS_SECRET_ACCESS_KEY = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(com.cloudbees.plugins.credentials.common.StandardCredentials.class, Jenkins.instance, null, null).find{it.id == "AWS_SECRET_ACCESS_KEY"}.getSecret()
+
+            def s3_path = "s3://backup93/test5/"
+
+            def command = """
+                export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                export AWS_DEFAULT_REGION=eu-central-1
+                aws s3 ls ${s3_path} | awk '{ print \\$NF }' | awk -F. '{print \\$2}' | sort -u -r 
+            """
+            def proc = ['bash', '-c', command].execute()
+            proc.waitFor()
+            def result =  'latest \\n' + proc.text 
+            return result.tokenize()
+            '''
+            
+        ]
+      ]
+    ]
+  ])
+])
+
+
+pipeline {
+    agent any
+    environment {
+      AWS_ACCESS_KEY_ID = credentials('AWS_ACCESS_KEY_ID')
+      AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+      AWS_DEFAULT_REGION = "eu-central-1"
+      S3_URL = "s3.eu-central-1.amazonaws.com" 
+      S3_BUCKET = "backup93"
+      S3_FOLDER = "test5"
+      CONFIG_FOLDER = 'filelist'
+      IP_SERVER = '192.168.199.65'
+      SERVER_USERNAME = 'horny'
+    }
+    stages {
+        stage("update filelist") {
+            when { 
+               expression{params.backuptime == ''}
+            }
+            steps { sh 'echo pass '}
+        }
+        stage("restore to date") {
+            when { 
+                allOf {
+                  expression{params.backuptime != ''}
+                  expression{params.backuptime != 'latest'}
+                }
+            }
+            steps {
+               withCredentials([sshUserPrivateKey(credentialsId: "test", keyFileVariable: 'keyfile')]) {
+                  sh """
+                  set -e 
+                  echo ${backuptime} 
+                  scp -o StrictHostKeyChecking=no -i ${keyfile} ./${S3_FOLDER} ${SERVER_USERNAME}@${IP_SERVER}:~ 
+                  ssh -o StrictHostKeyChecking=no -i ${keyfile} ${SERVER_USERNAME}@${IP_SERVER} <<-EOM
+                      cd ${S3_FOLDER}
+                      export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                      export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+                      export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} 
+                      duplicity restore -t ${backuptime} --s3-use-new-style --s3-european-buckets --force --no-encryption "s3://${S3_URL}/${S3_BUCKET}/${S3_FOLDER}/" s3_restore
+EOM
+                    """
+                }
+            }
+        }
+        stage("restore latest") {
+            when { 
+                expression{params.backuptime == 'latest'} 
+            }
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: "test", keyFileVariable: 'keyfile')]) {
+                    sh """
+                    set -e 
+                    scp -o StrictHostKeyChecking=no -i ${keyfile} ./${S3_FOLDER} ${SERVER_USERNAME}@${IP_SERVER}:~ 
+                    ssh -o StrictHostKeyChecking=no -i ${keyfile} ${SERVER_USERNAME}@${IP_SERVER} <<-EOM
+                        cd ${S3_FOLDER}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} 
+                        duplicity restore --s3-use-new-style --s3-european-buckets --force --no-encryption "s3://${S3_URL}/${S3_BUCKET}/${S3_FOLDER}/" s3_restore
+EOM
+                    """
+                }
+            }
+        }
+    }
+}
